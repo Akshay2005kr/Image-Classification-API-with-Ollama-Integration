@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Vision – Image Analyzer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/static/css/style.css" rel="stylesheet">
+</head>
+<body>
+<main class="app-shell">
+    <div class="halo-bg"></div>
+
+    <header class="app-header fade-in-up">
+        <h1>AI Vision Analyzer</h1>
+        <p>Upload one or more images and let your local Ollama vision model describe them in detail.</p>
+    </header>
+
+    <section class="glass-card main-card fade-in-up">
+        <form id="analyzeForm" class="flex-col" autocomplete="off">
+            <!-- Drag & drop image area -->
+            <div id="dropZone" class="drop-zone">
+                <div class="drop-content">
+                    <div class="drop-icon">🖼️</div>
+                    <h2>Drop your image(s) here</h2>
+                    <p>or click to browse from your device</p>
+                    <span class="hint">Supported: PNG, JPG, JPEG, GIF, WEBP — multiple allowed</span>
+                </div>
+                <input type="file" id="imageInput" name="image" accept="image/*" multiple>
+            </div>
+
+            <!-- Small preview -->
+            <div id="previewWrapper" class="preview-wrapper hidden"></div>
+
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="modelSelect">Model</label>
+                    <select id="modelSelect" name="model">
+                        <option value="">Auto (first from /models)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="focusInput">Focus (optional)</label>
+                    <input id="focusInput" name="focus" type="text" placeholder="e.g. cat, dog, car, person...">
+                    <small class="hint">
+                        If set, AI will describe only this object. Leave empty for full image description.
+                    </small>
+                </div>
+            </div>
+
+            <button type="submit" id="analyzeBtn" class="primary-btn">
+                <span class="btn-label">Analyze Image(s)</span>
+                <span class="btn-glow"></span>
+            </button>
+        </form>
+    </section>
+
+    <section class="glass-card result-card fade-in-up">
+        <div class="result-header">
+            <h2>AI Description</h2>
+            <div class="result-actions">
+                <button id="copyBtn" type="button" class="secondary-btn">Copy</button>
+                <button id="downloadBtn" type="button" class="secondary-btn">Download TXT</button>
+                <div id="loader" class="loader hidden">
+                    <div class="spinner"></div>
+                    <span>Thinking...</span>
+                </div>
+            </div>
+        </div>
+        <div id="resultBox" class="result-box">
+            <span class="placeholder">Result will appear here after analysis.</span>
+        </div>
+    </section>
+
+    <footer class="app-footer fade-in-up">
+        <span>Powered by Flask · Ollama · Local Vision Models</span>
+    </footer>
+</main>
+
+<script>
+/* ---------- Typewriter effect ---------- */
+function typeText(element, text, speed = 12) {
+    element.textContent = "";
+    let i = 0;
+    const interval = setInterval(() => {
+        element.textContent += text.charAt(i);
+        if (++i >= text.length) clearInterval(interval);
+    }, speed);
+}
+
+/* ---------- UI Elements ---------- */
+const dropZone      = document.getElementById("dropZone");
+const imageInput    = document.getElementById("imageInput");
+const previewWrap   = document.getElementById("previewWrapper");
+const analyzeForm   = document.getElementById("analyzeForm");
+const analyzeBtn    = document.getElementById("analyzeBtn");
+const resultBox     = document.getElementById("resultBox");
+const loader        = document.getElementById("loader");
+const modelSelect   = document.getElementById("modelSelect");
+const copyBtn       = document.getElementById("copyBtn");
+const downloadBtn   = document.getElementById("downloadBtn");
+
+let selectedFiles = [];
+let lastResultText = "";
+
+/* ---------- Drag & Drop / Preview MULTIPLE ---------- */
+["dragenter", "dragover"].forEach(evt =>
+    dropZone.addEventListener(evt, e => {
+        e.preventDefault(); dropZone.classList.add("drag-over");
+    })
+);
+["dragleave", "drop"].forEach(evt =>
+    dropZone.addEventListener(evt, e => {
+        e.preventDefault(); dropZone.classList.remove("drag-over");
+    })
+);
+
+dropZone.addEventListener("click", () => imageInput.click());
+
+dropZone.addEventListener("drop", e => handleFiles(e.dataTransfer.files));
+imageInput.addEventListener("change", e => handleFiles(e.target.files));
+
+function handleFiles(fileList) {
+    selectedFiles = Array.from(fileList);
+    previewWrap.innerHTML = "";
+    previewWrap.classList.remove("hidden");
+
+    selectedFiles.forEach(file => {
+        const reader = new FileReader();
+        reader.onload = e => {
+            const img = document.createElement("img");
+            img.src = e.target.result;
+            img.style.height = "55px";
+            img.style.width = "55px";
+            img.style.borderRadius = "999px";
+            img.style.objectFit = "cover";
+            previewWrap.appendChild(img);
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
+/* ---------- Load models ---------- */
+async function loadModels() {
+    try {
+        const res = await fetch("/models");
+        const data = await res.json();
+        if (data.success) {
+            data.models.forEach(m => {
+                const opt = document.createElement("option");
+                opt.value = m; opt.textContent = m;
+                modelSelect.appendChild(opt);
+            });
+        }
+    } catch {}
+}
+loadModels();
+
+/* ---------- Submit ---------- */
+analyzeForm.addEventListener("submit", async e => {
+    e.preventDefault();
+
+    if (selectedFiles.length === 0) {
+        resultBox.innerHTML = "<span class='error'>Please upload at least one image.</span>";
+        return;
+    }
+
+    const formData = new FormData();
+    selectedFiles.forEach(f => formData.append("image", f));
+
+    const model = modelSelect.value.trim();
+    const focus = document.getElementById("focusInput").value.trim();
+    if (model) formData.append("model", model);
+    if (focus) formData.append("focus", focus);
+
+    loader.classList.remove("hidden");
+    analyzeBtn.disabled = true;
+    analyzeBtn.classList.add("loading");
+    resultBox.innerHTML = "<span class='placeholder'>Waiting for AI response...</span>";
+
+    try {
+        const res = await fetch("/classify", { method: "POST", body: formData });
+        const data = await res.json();
+
+        loader.classList.add("hidden");
+        analyzeBtn.disabled = false;
+        analyzeBtn.classList.remove("loading");
+
+        if (!data.success) {
+            resultBox.innerHTML = `<span class="error">Error: ${data.error}</span>`;
+            return;
+        }
+
+        // Expect: { success: true, results: [ { description, focus }, ... ] }
+        resultBox.innerHTML = "";
+        lastResultText = "";
+
+        data.results.forEach((item, idx) => {
+            let text = `Image ${idx + 1}\n\n`;
+            if (item.focus) text += `Focus: ${item.focus}\n\n`;
+            text += item.description + "\n\n";
+            lastResultText += text;
+
+            const pre = document.createElement("pre");
+            pre.className = "result-text";
+            resultBox.appendChild(pre);
+            typeText(pre, text);
+        });
+
+        resultBox.scrollIntoView({ behavior: "smooth" });
+
+    } catch (err) {
+        loader.classList.add("hidden");
+        analyzeBtn.disabled = false;
+        analyzeBtn.classList.remove("loading");
+        resultBox.innerHTML = `<span class="error">Request failed: ${err.message}</span>`;
+    }
+});
+
+/* ---------- Copy & Download ---------- */
+copyBtn.addEventListener("click", () => {
+    if (!lastResultText) return alert("No description to copy yet.");
+    navigator.clipboard.writeText(lastResultText);
+    copyBtn.textContent = "Copied!";
+    setTimeout(() => copyBtn.textContent = "Copy", 1200);
+});
+downloadBtn.addEventListener("click", () => {
+    if (!lastResultText) return alert("No description to download yet.");
+    const blob = new Blob([lastResultText], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "description.txt";
+    a.click();
+});
+</script>
+</body>
+</html>
